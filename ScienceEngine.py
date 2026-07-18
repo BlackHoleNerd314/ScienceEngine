@@ -300,7 +300,65 @@ def quantum_rotation_to_align_spin(N:int,spin_unit):
     R_inv = spin_transform_matrix(N,0, 0, 0, -omx, -omy, omz)
     return R, R_inv
 
+# ----------------------------------------------------------------------
+# Analytic Boost/Rotation Matrices
+# ----------------------------------------------------------------------
+def boost_matrix_from_3vel_analytic(v3):
+    """Fast analytic pure boost (no expm). Matches your lorentz_transform_matrix convention."""
+    vx, vy, vz = float(v3[0]), float(v3[1]), float(v3[2])
+    v2 = vx*vx + vy*vy + vz*vz
+    if v2 < 1e-14:
+        return np.eye(4)
+    v = math.sqrt(v2)
+    if v > 0.999999:
+        v = 0.999999
+        s = v / math.sqrt(vx*vx + vy*vy + vz*vz) if v2 > 0 else 0.0
+        vx, vy, vz = vx*s, vy*s, vz*s
+        v2 = vx*vx + vy*vy + vz*vz
+    gamma = 1.0 / math.sqrt(1.0 - v*v)
+    Lambda = np.eye(4, dtype=float)
+    Lambda[0, 0] = gamma
+    Lambda[0, 1] = gamma * vx
+    Lambda[0, 2] = gamma * vy
+    Lambda[0, 3] = gamma * vz
+    Lambda[1, 0] = gamma * vx
+    Lambda[2, 0] = gamma * vy
+    Lambda[3, 0] = gamma * vz
+    fac = (gamma - 1.0) / v2
+    Lambda[1, 1] = 1.0 + fac * vx * vx
+    Lambda[1, 2] = fac * vx * vy
+    Lambda[1, 3] = fac * vx * vz
+    Lambda[2, 1] = fac * vy * vx
+    Lambda[2, 2] = 1.0 + fac * vy * vy
+    Lambda[2, 3] = fac * vy * vz
+    Lambda[3, 1] = fac * vz * vx
+    Lambda[3, 2] = fac * vz * vy
+    Lambda[3, 3] = 1.0 + fac * vz * vz
+    return Lambda
 
+def rotation_to_align_spin_analytic(spin_unit):
+    """Fast Rodrigues-style rotation (no expm) that rotates spin_unit onto +Z. Returns (R, R_inv) 4x4."""
+    nx, ny, nz = float(spin_unit[0]), float(spin_unit[1]), float(spin_unit[2])
+    cos_theta = max(-1.0, min(1.0, nz))
+    if cos_theta > 1.0 - 1e-12:
+        return np.eye(4), np.eye(4)
+    if cos_theta < -1.0 + 1e-12:
+        # π rotation around x
+        R = np.array([[1,0,0,0],[0,1,0,0],[0,0,-1,0],[0,0,0,-1]], dtype=float)
+        return R, R
+    theta = math.acos(cos_theta)
+    sin_theta = math.sqrt(max(1.0 - cos_theta*cos_theta, 0.0))
+    # axis k = (ny, -nx, 0) / sin_theta
+    kx = ny / sin_theta
+    ky = -nx / sin_theta
+    kz = 0.0
+    # Rodrigues 3x3
+    K = np.array([[0, -kz, ky],[kz, 0, -kx],[-ky, kx, 0]], dtype=float)
+    R3 = np.eye(3) + math.sin(theta)*K + (1-math.cos(theta))*(K @ K)
+    R = np.eye(4, dtype=float)
+    R[1:4,1:4] = R3
+    R_inv = R.T  # rotation, orthogonal
+    return R, R_inv
 # -----------------------------------------------------------------------
 # 4-vector / 4-velocity helpers
 # -----------------------------------------------------------------------
@@ -388,19 +446,13 @@ def _ks_L(a: float, r: float, x: float, y: float, z: float) -> np.ndarray:
     return L
 
 
-def kerr_metric_restframe(m: float, a: float, x3) -> np.ndarray:
+def kerr_tetrad_restframe(m: float, a: float, x3) -> np.ndarray:
     """
-    Kerr metric g_μν at spatial position x3 = (x, y, z) in the source
-    rest frame with spin axis along +Z.
 
-    Built from the tetrad  e[μ,a] = I[μ,a] + (H/2) L^μ (η_{aν} L^ν)
+    The tetrad  e[μ,a] = I[μ,a] + (H/2) L^μ (η_{aν} L^ν)
     exactly as in CGH.py but with Lorentz parameters all zero (no active
     boost or rotation away from the standard Kerr-Schild chart):
 
-        g[μ,ν] = η[a,b] e[μ,a] e[ν,b]
-               = η[μ,ν] + H L[μ] L[ν]    (exploiting L·L = 0 w.r.t. η)
-
-    The metric is stationary so only the spatial components of x3 matter.
     """
     x, y, z = float(x3[0]), float(x3[1]), float(x3[2])
     eta = minkowski_metric()
@@ -410,7 +462,20 @@ def kerr_metric_restframe(m: float, a: float, x3) -> np.ndarray:
     l = eta @ L                        # L_μ  (lower) = η_{μν} L^ν
     # Tetrad with Λ = I:  e[μ, a] = δ[μ,a] + (H/2) L[μ] l[a]
     e = np.eye(4) + 0.5 * H * np.outer(l, L)
+    return e
+
+def kerr_metric_restframe(m: float, a0: float, x3) -> np.ndarray:
+    """
+        Kerr metric g_μν at spatial position x3 = (x, y, z) in the source
+        rest frame with spin axis along +Z.
+                g[μ,ν] = η[a,b] e[μ,a] e[ν,b]
+               = η[μ,ν] + H L[μ] L[ν]    (exploiting L·L = 0 w.r.t. η)
+
+    The metric is stationary so only the spatial components of x3 matter.
+    """
     # g[μ,ν] = η[a,b] e[μ,a] e[ν,b]
+    eta = minkowski_metric()
+    e = kerr_tetrad_restframe(m, a0, x3)
     return np.einsum('ab,ua,vb->uv', eta, e, e)
 
 def christoffel_fd(x3, m: float, a: float, eps: float = 1e-6) -> np.ndarray:
@@ -513,6 +578,9 @@ class Particle:
         self.proper_time: float = 0.0
         # Cache: list of dicts, sorted by ascending coordinate time.
         self._cache: list = [self._snapshot()]
+        # ancestry tracking
+        self.parent_ids = []  # names of particles that formed this one
+        self.children = []  # particles formed from this one
 
     # ------------------------------------------------------------------
 
@@ -721,7 +789,7 @@ def Quantum(particle: Particle, dlambda: float):
     M = particle.mass
     v4 = particle.vel
     v3 = three_velocity_from_4velocity(v4)
-    dr = np.sqrt(dlambda/M)/137.036
+    dr = np.sqrt(dlambda/M)
     deltaX = np.zeros((4))
     deltaX[0] = 0
     deltaX[1] = np.random.normal() * dr
@@ -730,7 +798,6 @@ def Quantum(particle: Particle, dlambda: float):
     Lambda_from_rest = boost_matrix_from_3vel(v3)
     dX4 = Lambda_from_rest @ deltaX
     return dX4
-
 
 
 # -----------------------------------------------------------------------
@@ -748,6 +815,80 @@ def euler_step(particle: Particle, dlambda: float,
     particle.pos = particle.pos + particle.vel * dlambda
     particle.proper_time += dlambda
     particle.record()
+
+
+
+
+# -----------------------------------------------------------------------
+# The 3 CGH Physics Checks
+# -----------------------------------------------------------------------
+
+def IsRelativistic(particle: Particle, source: Particle):
+    RelativeFrame = boost_matrix_from_3vel_analytic(-three_velocity_from_4velocity(particle.vel))
+    V = source.vel @ RelativeFrame
+    return 1/np.linalg.norm(V[1:4])
+
+def IsGravitational(particle: Particle, source: Particle):
+    M_total = particle.mass + source.mass
+    RelativeFrame = boost_matrix_from_3vel_analytic(-three_velocity_from_4velocity(particle.vel))
+    V = source.vel @ RelativeFrame
+    v = np.linalg.norm(V[1:4])
+    dX = (particle.pos - source.pos) @ RelativeFrame
+    r = np.linalg.norm(dX[1:4])
+    return (v**2)*r/M_total
+
+def IsQuantum(particle: Particle, source: Particle):
+    M_reduced = particle.mass * source.mass / (particle.mass + source.mass)
+    RelativeFrame = boost_matrix_from_3vel_analytic(-three_velocity_from_4velocity(particle.vel))
+    V = source.vel @ RelativeFrame
+    v = np.linalg.norm(V[1:4])
+    dX = (particle.pos - source.pos) @ RelativeFrame
+    r = np.linalg.norm(dX[1:4])
+    return r*v*M_reduced
+
+
+# -----------------------------------------------------------------------
+# All 8 Integrators for the CGH Physics Cube
+# -----------------------------------------------------------------------
+
+def DomainSolver(particle: Particle, dlambda: float,
+               sources: list) -> None:
+    cutoff = 137.036
+    v4 = particle.vel
+    v3 = three_velocity_from_4velocity(v4)
+    Lambda_from_rest = boost_matrix_from_3vel_analytic(v3)
+    #Lambda_to_rest = lorentz_inverse(Lambda_from_rest)
+    for src in sources:
+        C0 = IsRelativistic(particle, src) < cutoff
+        G0 = IsGravitational(particle, src) < cutoff
+        #H0 = IsQuantum(particle, src) < cutoff
+        if C0 and G0:
+            du, dj = compute_acceleration(particle, sources)
+            particle.vel += du * dlambda
+            particle.spin += dj * dlambda
+        if not C0 and G0:
+            M = src.mass
+            x = src.pos - particle.pos
+            r = np.linalg.norm(x)
+            du_rest = -M * x/r**3
+            particle.vel += Lambda_from_rest @ du_rest * dlambda
+        particle.pos += particle.vel * dlambda
+        particle.proper_time += dlambda
+        particle.record()
+
+
+
+#class CGHphysics:
+#    def __init__(self, C0: bool, G0: bool, H0: bool, particle: Particle, sources: list ):
+#        self.relativistic = C0.copy()
+#        self.gravitational = G0.copy()
+#        self.quantum = H0.copy()
+#        self.particles = particle.copy()
+#        self.sources = sources.copy()
+#    def DomainFinder(particle: Particle, sources: list) -> np.ndarray:
+#        for src in sources:
+#            if IsRelativistic(particle, src) < 137.036:
+
 
 
 # -----------------------------------------------------------------------
@@ -832,7 +973,7 @@ def build_observer_view(observer: Particle,
 
         events.append({
             'name': src.name,
-            'x4_obs': dx_obs_z,      # 4-position of source event in observer Z-aligned frame
+            'x4_obs': dx_obs,      # 4-position of source event in observer Z-aligned frame
             'lambda_src_ret': lam_ret,
             'src_mass': src.mass
         })
@@ -886,38 +1027,97 @@ def run_nbody_step(particles: list,
 
     return view_events, t_target
 
+
+def spawn_grid(n, spacing):
+    pts = []
+    counter = 0
+
+    for i in range(n):
+        x = np.random.normal()*spacing
+        y = np.random.normal()*spacing
+        z = np.random.normal()*spacing
+
+        pos4 = np.array([0.0, x, y, z])
+        vel4 = four_velocity_from_3velocity((0,0,0))
+
+        spin = np.array([
+            0.0,
+            np.random.normal(),
+            np.random.normal(),
+            np.random.normal()
+        ])
+
+        pts.append(
+            Particle(
+                pos4=pos4,
+                vel4=vel4,
+                spin4=spin,
+                mass=np.random.uniform(),
+                name=f"p{counter}"
+            )
+        )
+        counter += 1
+
+    return pts
+
+def run_example_debug(n,r):
+    particles = []
+    # add grid particles
+    particles += spawn_grid(n, r)
+    observer = particles[0]  # or whichever
+    observer_name = observer.name
+    dlambda = 1
+    return particles, observer_name, dlambda
+
 def run_example():
-    M = 1
-    r0 = 10
+    M = 10
+    r0 = 100
     v_c = math.sqrt(M / r0)
 
     p1 = Particle(
-        pos4=np.array([0.0, -r0, 0.0, 0.0]),
-        vel4=four_velocity_from_3velocity((0.0, 0.0, v_c / 2)),
+        pos4=np.array([0.0, 0.0, -r0, 0.0]),
+        vel4=four_velocity_from_3velocity((v_c / 2, 0.0, 0.0)),
         mass=M,
-        spin4=np.array([0.0, 0.0, 0.0, 0.5]),
+        spin4=np.array([0.0, 0.5, 0.0, 0.0]),
         name="p1",
     )
     p2 = Particle(
-        pos4=np.array([0.0, r0, 0.0, 0.0]),
-        vel4=four_velocity_from_3velocity((0.0, 0.0, -v_c / 2)),
+        pos4=np.array([0.0, 0.0, r0, 0.0]),
+        vel4=four_velocity_from_3velocity((-v_c / 2, 0.0, 0.0)),
         mass=M,
-        spin4=np.array([0.0, 0.3, 0.0, -0.4]),
+        spin4=np.array([0.0, -0.4, 0.0, 0.3]),
         name="p2",
     )
     p3 = Particle(
-        pos4=np.array([0.0, 0, -r0*15, 0]),
+        pos4=np.array([0.0, 0, 0, -r0*15]),
         vel4=four_velocity_from_3velocity((0.0, 0.0, 0.0)),
         mass=M,
-        spin4=np.array([0.0, 0.0, 0.1, 0.0]),
+        spin4=np.array([0.0, 0.0, 0.0, 1.0]),
         name="p3",
     )
 
     particles = [p1, p2, p3]
     observer_name = "p3"
-    dlambda = 1
+    dlambda = 10
 
     return particles, observer_name, dlambda
+
+def rebind_observer(observer, particles):
+    # Case 1: observer still exists
+    if observer in particles:
+        return observer
+
+    # Case 2: observer was merged — find the particle that lists it as a parent
+    for p in particles:
+        if observer.name in p.parent_ids:
+            return p
+
+    # Case 3: fallback — choose nearest particle in spacetime
+    return min(
+        particles,
+        key=lambda p: np.linalg.norm(p.pos4 - observer.pos4)
+    )
+
 
 def merge_particles(p1: Particle, p2: Particle) -> Particle:
     # 4-momentum conservation
@@ -944,6 +1144,12 @@ def merge_particles(p1: Particle, p2: Particle) -> Particle:
         mass=m_new,
         name=f"{p1.name}+{p2.name}"
     )
+
+    # ancestry
+    merged.parent_ids = [p1.name, p2.name]
+    p1.children.append(merged)
+    p2.children.append(merged)
+
     return merged
 
 def horizon_radius(p: Particle) -> float:
@@ -988,127 +1194,125 @@ def apply_mergers(particles):
 
     return merged_list
 
+    # -----------------------------------------------------------------------
+    # MAIN - CLEAN BODY TRIAD VERSION (only this section is improved)
+    # -----------------------------------------------------------------------
 
 def main():
     pygame.init()
     width, height = 720, 480
     screen = pygame.display.set_mode((width, height))
-    pygame.display.set_caption("Science Engine: First-Person Relativistic View")
+    pygame.display.set_caption("Black Hole Orbiter - Body Frame Camera")
     clock = pygame.time.Clock()
 
-    # ---------------------------------------------------------
-    # INITIALIZE SIMULATION (from run_example)
-    # ---------------------------------------------------------
     particles, observer_name, dlambda = run_example()
     frame_idx = 0
-    Rotate0 = np.eye(4)
     observer = {p.name: p for p in particles}[observer_name]
+
+    # Body triad (world space)
+    w_body = np.array([0,0,0],dtype=float)
+    # Convention: X = right, Y = up, Z = forward  (matches Godot feel + Python depth = component 3)
+    X = np.array([1.0, 0.0, 0.0])
+    Y = np.array([0.0, 0.0, 1.0])
+    Z = np.array([0.0, 1.0, 0.0])
+
+    R0 = np.eye(4)
+
+    boost_strength = 0.06
+    rot_strength   = 0.001
 
     running = True
     while running:
-
-        # Quit handling
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
 
         keys = pygame.key.get_pressed()
 
-        X0 = 0
-        Y0 = 0
-        Z0 = 0
-        boost_strength = 0.02  # small rapidity per frame
-        rotate_strength = 0.02 # small angle per frame
+        # ---------- Body-frame input ----------
+        boost_input = np.zeros(3)
+        rot_input   = np.zeros(3)
 
-        if keys[pygame.K_w]:
-            Y0 += boost_strength  # forward
-        if keys[pygame.K_s]:
-            Y0 -= boost_strength  # backward
-        if keys[pygame.K_a]:
-            X0 -= boost_strength  # left
-        if keys[pygame.K_d]:
-            X0 += boost_strength  # right
-        if keys[pygame.K_r]:
-            Z0 -= boost_strength  # up
-        if keys[pygame.K_f]:
-            Z0 += boost_strength  # down
+        w_world = X * w_body[0] + Y * w_body[1] + Z * w_body[2]
 
-        X1 = 0
-        Y1 = 0
-        Z1 = 0
+        # Pure spatial rotation (your preferred method)
+        R = lorentz_transform_matrix(0.0, 0.0, 0.0,
+                                     w_world[0], w_world[1], w_world[2])
 
-        if keys[pygame.K_q]:
-            Z1 += rotate_strength
-        if keys[pygame.K_e]:
-            Z1 -= rotate_strength
-        if keys[pygame.K_z]:
-            X1 += rotate_strength
-        if keys[pygame.K_x]:
-            X1 -= rotate_strength
-        if keys[pygame.K_v]:
-            Y1 += rotate_strength
-        if keys[pygame.K_c]:
-            Y1 -= rotate_strength
+        # Rotate the triad (extract the spatial 3×3 block)
+        R0 = R0 @ R
+        R3 = np.linalg.inv(R[1:4,1:4])
 
-        Rotate0 = Rotate0 @ lorentz_transform_matrix(0, 0, 0, X1, Y1, Z1)
+        # Movement (WASD + Space/Shift)  – body frame
+        if keys[pygame.K_w]:          boost_input[1] += 1   # Forward
+        if keys[pygame.K_s]:          boost_input[1] -= 1   # Backward
+        if keys[pygame.K_a]:          boost_input[0] -= 1   # Left
+        if keys[pygame.K_d]:          boost_input[0] += 1   # Right
+        if keys[pygame.K_SPACE]:      boost_input[2] += 1   # Up
+        if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+                                      boost_input[2] -= 1   # Down
 
-        if (X0 or Y0 or Z0 or X1 or Y1 or Z1):
-            # Boost Logic
-            Boost0 = lorentz_transform_matrix(X0, Y0, Z0, 0, 0, 0)
-            observer.vel = Boost0 @ observer.vel
-            observer.spin = Boost0 @ observer.spin
-            # SYNC: Update the observer in particles list
-            for i, p in enumerate(particles):
-                if p.name == observer_name:
-                    particles[i] = observer
-                    break
+        # Rotation (Arrow keys + Q/E)  – body frame
+        if keys[pygame.K_UP]:         rot_input[0] += 1     # Pitch up
+        if keys[pygame.K_DOWN]:       rot_input[0] -= 1     # Pitch down
+        if keys[pygame.K_LEFT]:       rot_input[2] += 1     # Yaw left
+        if keys[pygame.K_RIGHT]:      rot_input[2] -= 1     # Yaw right
+        if keys[pygame.K_q]:          rot_input[1] += 1     # Roll left
+        if keys[pygame.K_e]:          rot_input[1] -= 1     # Roll right
 
-        # ---------------------------------------------------------
-        # PHYSICS STEP (ONE PROPER-TIME TICK)
-        # ---------------------------------------------------------
-        view_events, t_obs = run_nbody_step(
-            particles,
-            observer_name,
-            dlambda,
-            frame_idx
-        )
+        # ---------- Body-frame boost ----------
+        if np.linalg.norm(boost_input) > 1e-6:
+            body_dir = boost_input / np.linalg.norm(boost_input)
+            world_dir = body_dir[0]*X + body_dir[1]*Y + body_dir[2]*Z
+            Boost = boost_matrix_from_3vel_analytic(world_dir * boost_strength)
+            observer.vel  = Boost @ observer.vel
+            observer.spin = Boost @ observer.spin
 
-        # apply mergers AFTER advancing
+        # ---------- Body-frame rotation using your lorentz_transform_matrix ----------
+        if np.linalg.norm(rot_input) > 1e-6:
+            # Body-frame generator components
+            body_dir0 = rot_input / np.linalg.norm(rot_input)
+            #world_dir0 = body_dir0[0]*X + body_dir0[1]*Y + body_dir0[2]*Z
+            w_body += body_dir0 * rot_strength
+
+
+        #R3 =
+        X = R3 @ X
+        Y = R3 @ Y
+        Z = R3 @ Z
+
+        # Generate the spin from the observer's angular velocity
+        observer.spin = np.array((0.0, w_world[0], w_world[1], w_world[2]))
+
+        # Final constraints
+        observer.vel  = normalize_4velocity(observer.vel)
+        observer.spin = Initialize_spin_vector(observer.spin, observer.vel)
+
+        # ---------- Physics (unchanged) ----------
+        view_events, t_obs = run_nbody_step(particles, observer_name, dlambda, frame_idx)
+
         particles = apply_mergers(particles)
+        observer = rebind_observer(observer, particles)
+        observer_name = observer.name
 
-        # Rebind observer after mergers
-        observer = {p.name: p for p in particles}[observer_name]
-
-        # ---------------------------------------------------------
-        # RENDER
-        # ---------------------------------------------------------
+        # ---------- Render (unchanged) ----------
         screen.fill((0, 0, 0))
-
         for ev in view_events:
-            x4 = ev["x4_obs"]
-            x4 = Rotate0 @ x4
-            X = x4[1]
-            Y = x4[2]
-            Z = x4[3]
-            if Z > 0.1:
-                fov = 540
-                sx = int(width/2 + fov * X / Z)
-                sy = int(height/2 - fov * Y / Z)
-
+            x4 = R0 @ ev["x4_obs"]
+            Xv, Yv, Zv = x4[1], x4[2], x4[3]
+            if Zv > 0.1:
+                sx = int(width/2 + 540 * Xv / Zv)
+                sy = int(height/2 - 540 * Yv / Zv)
                 if 0 <= sx < width and 0 <= sy < height:
-                    radius = fov * ev['src_mass'] / np.sqrt(X ** 2 + Y ** 2 + Z ** 2)
-                    pygame.draw.circle(screen, (255,255,255), (sx, sy), radius)
+                    radius = max(1, int(540 * ev['src_mass'] / max(np.sqrt(Xv*Xv + Yv*Yv + Zv*Zv), 1)))
+                    pygame.draw.circle(screen, (255, 255, 255), (sx, sy), radius)
 
-        # HUD
-        font = pygame.font.SysFont(None, 24)
-        hud = font.render(
-            f"λ={observer.proper_time:.2f}  t={observer.coord_time:.2f}",
-            True, (200,200,200)
-        )
-        screen.blit(hud, (20,20))
+        font = pygame.font.SysFont("Comic Sans MS", 20)
+        hud = font.render(f"time={observer.proper_time:.2f}  mass={observer.mass:.2f}", True, (200,200,200))
+        screen.blit(hud, (20, 20))
 
         pygame.display.flip()
-        clock.tick(47)
+        clock.tick(60)
         frame_idx += 1
 
     pygame.quit()
@@ -1116,5 +1320,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
