@@ -1,7 +1,7 @@
 import numpy as np
 import Orbiter as BHO
 import Minkowski as mink
-cutoff = 1/137.036
+cutoff = 0.1#1/137.036
 eps = 1e-7
 def RelativityCheck(particle: BHO.Particle) -> None:
     v3 = mink.three_velocity_from_4velocity(particle.vel)
@@ -84,8 +84,8 @@ def solve_classical(particles, observer_name, dlambda):
 def solve_gravity(particles, observer_name, dlambda):
     view_events = []
     observer = {p.name: p for p in particles}[observer_name]
-    observer.pos = np.array([0, 0, 0, 0], dtype=float)
-    observer.vel = np.array([1, 0, 0, 0], dtype=float)
+    observer.pos = [0, 0, 0, 0]
+    observer.vel = [1, 0, 0, 0]
     dt = dlambda
     for pi in particles:
         pi.vel[0] = 1
@@ -117,26 +117,65 @@ def solve_gravity(particles, observer_name, dlambda):
             'src_mass': p.mass
         })
     return view_events
-def Dispatcher(particles: list,
-                   observer_name: str,
-                   dlambda: float):
+def Dispatcher(particles: list, observer_name: str, dlambda: float):
+    if not particles:
+        return particles, []
     for p in particles:
         RelativityCheck(p)
-        GravityCheck(p,particles)
-    for p in particles:
-        if p.IsRelativistic and p.IsGravitational:
-            return BHO.Rebased_Step(particles,
-            observer_name,
-            dlambda)
-        if (not p.IsRelativistic) and p.IsGravitational:
-            return solve_gravity(particles,
-            observer_name,
-            dlambda)
-        if p.IsRelativistic and (not p.IsGravitational):
-            return solve_relativistic(particles,
-            observer_name,
-            dlambda)
-        if (not p.IsRelativistic) and (not p.IsGravitational):
-            return solve_classical(particles,
-            observer_name,
-            dlambda)
+        GravityCheck(p, particles)
+    observer = next(p for p in particles if p.name == observer_name)
+    n = len(particles)
+    parent = list(range(n))
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    def union(i, j):
+        pi, pj = find(i), find(j)
+        if pi != pj:
+            parent[pi] = pj
+    for i in range(n):
+        for j in range(i + 1, n):
+            pi, pj = particles[i], particles[j]
+            r = np.linalg.norm(pi.pos[1:4] - pj.pos[1:4]) + eps
+            PE_i = pj.mass / r
+            PE_j = pi.mass / r
+            redM = (pi.mass * pj.mass) / (pi.mass + pj.mass + eps)
+            vrel = np.linalg.norm((pi.vel - pj.vel)[1:4])
+            KE = redM * (vrel ** 2) / 2 + eps
+            if (PE_i / KE > cutoff) or (PE_j / KE > cutoff):
+                union(i, j)
+    from collections import defaultdict
+    clusters = defaultdict(list)
+    for i, p in enumerate(particles):
+        clusters[find(i)].append(p)
+    view_events = []
+    for cluster in clusters.values():
+        local_rel  = any(p.IsRelativistic  for p in cluster)
+        local_grav = any(p.IsGravitational for p in cluster)
+        cluster_with_obs = cluster if observer in cluster else cluster + [observer]
+        cluster_names = {p.name for p in cluster}
+        if local_rel and local_grav:
+            result = BHO.Rebased_Step(cluster_with_obs, observer_name, dlambda)
+        elif local_grav:
+            result = solve_gravity(cluster_with_obs, observer_name, dlambda)
+        elif local_rel:
+            result = solve_relativistic(cluster_with_obs, observer_name, dlambda)
+        else:
+            result = solve_classical(cluster_with_obs, observer_name, dlambda)
+        if isinstance(result, tuple) and len(result) == 2:
+            _, events = result
+        else:
+            events = result
+        if not events:
+            continue
+        for e in events:
+            name = None
+            if isinstance(e, dict):
+                name = e.get("name")
+            elif isinstance(e, (list, tuple)) and len(e) > 0 and isinstance(e[0], str):
+                name = e[0]
+            if name is None or name in cluster_names:
+                view_events.append(e)
+    return particles, view_events
