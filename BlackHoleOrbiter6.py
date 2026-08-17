@@ -1,0 +1,1324 @@
+#!/usr/bin/env python3
+"""
+Black Hole Orbiter (revised).
+
+Improvements over original:
+  1. Translated from MATLAB into Python, which opens the possibility of
+    making a scientifically accurate game-engine with pygame visualizations
+    while keeping low level control throughout for critical features.
+  2. Simulates General Relativity Numerically, by referencing a 1975 paper
+    "A Lorentz Covariant Treatment of the Kerr-Schild Geometry" by Gurses and Gursey.
+    It is the only known way to fully simulate the General Theory of Relativity
+    by using the only coordinate system that exactly linearizes the
+    Einstein Field Equations, and does so without Supercomputing Clusters.
+  3. Keeps the author's complete unifying vision of a Unified Field Theory intact.
+    To do this requires a paradigm shift where every particle
+    is also a rotating black hole, a field quantum, and an observer.
+    This means one recovers Lorentz Covariant Motion in Special Relativity,
+    Newtonian Force Laws of Universal Gravitation, Quantum Mechanics, and
+    Multi-Particle Theory, with both mass and spin as particle invariants.
+
+Author: Erik Jorgensen
+Date: 2026-05-30 (revised), 2009-08-22 (original)
+"""
+
+import math
+import numpy as np
+from scipy.linalg import expm
+import pygame
+import sys
+
+# -----------------------------------------------------------------------
+# Minkowski metric  η_μν = diag(-1,+1,+1,+1)
+# -----------------------------------------------------------------------
+
+def minkowski_metric() -> np.ndarray:
+    """Return η_μν with signature (−+++)."""
+    return np.diag([-1.0, 1.0, 1.0, 1.0])
+
+
+# -----------------------------------------------------------------------
+# Change 4: Lorentz group via matrix exponential  (matches CGH.py)
+# -----------------------------------------------------------------------
+
+def lorentz_transform_matrix(Kx: float, Ky: float, Kz: float,
+                              Jx: float, Jy: float, Jz: float) -> np.ndarray:
+    """
+    General Lorentz transformation  Λ = exp(M)  where M is the generator.
+
+    K components are rapidities (boost parameters);
+    J components are rotation angles.
+    Convention identical to CGH.py:
+        M = [[0,  Kx,  Ky,  Kz],
+             [Kx,  0, -Jz,  Jy],
+             [Ky,  Jz,  0, -Jx],
+             [Kz, -Jy,  Jx,  0]]
+    """
+    M = np.array([[0.0,  Kx,   Ky,   Kz],
+                  [Kx,  0.0,  -Jz,   Jy],
+                  [Ky,   Jz,  0.0,  -Jx],
+                  [Kz,  -Jy,   Jx,  0.0]])
+    return expm(M)
+
+
+def boost_matrix_from_3vel(v3) -> np.ndarray:
+    """
+    Pure Lorentz boost for 3-velocity v3 = (vx, vy, vz).
+
+    Converts to rapidity  η = arctanh(|v|)  and feeds the unit-direction
+    components into lorentz_transform_matrix as (Kx, Ky, Kz).
+    No rotation parameters are used.
+    """
+    vx, vy, vz = float(v3[0]), float(v3[1]), float(v3[2])
+    vmag = math.sqrt(vx*vx + vy*vy + vz*vz)
+    if vmag < 1e-14:
+        return np.eye(4)
+    vmag_c = min(vmag, 1.0 - 1e-10)   # clamp away from light-speed
+    rapidity = math.atanh(vmag_c)
+    nx, ny, nz = vx/vmag, vy/vmag, vz/vmag
+    return lorentz_transform_matrix(nx*rapidity, ny*rapidity, nz*rapidity,
+                                    0.0, 0.0, 0.0)
+
+
+def lorentz_inverse(Lambda: np.ndarray) -> np.ndarray:
+    """
+    Inverse of a Lorentz matrix:  Λ^{-1} = η Λ^T η.
+    Works for any element of O(1,3).
+    """
+    eta = minkowski_metric()
+    return eta @ Lambda.T @ eta
+
+
+def rotation_to_align_spin(spin_unit) -> tuple:
+    """
+    Return (R, R_inv): 4×4 spatial rotation matrices built from
+    lorentz_transform_matrix (zero boost params) that actively rotate
+    *spin_unit* onto +Z.
+
+    Derivation
+    ----------
+    Given unit vector n̂ we need R such that  R n̂ = ẑ.
+    Rotation axis:  k̂ = (n̂ × ẑ) / |n̂ × ẑ|
+    Rotation angle: θ  = arccos(n̂ · ẑ)
+    Rotation vector sent to the generator: ω = θ k̂
+
+    With ẑ = (0,0,1):
+        n̂ × ẑ = (ny, −nx, 0)   →   ω = θ(ny, −nx, 0) / sinθ
+
+    The Jx, Jy, Jz parameters of lorentz_transform_matrix encode the
+    rotation vector directly (no boost, K=0), so the result is a pure
+    spatial rotation that leaves the time component untouched.
+
+    Special cases
+    -------------
+    n̂ ≈ +ẑ : identity (no rotation needed).
+    n̂ ≈ −ẑ : π rotation around x̂.
+    """
+    nx, ny, nz = float(spin_unit[0]), float(spin_unit[1]), float(spin_unit[2])
+    cos_theta = max(-1.0, min(1.0, nz))   # n̂ · ẑ = nz
+
+    if cos_theta > 1.0 - 1e-12:           # already aligned with +Z
+        return np.eye(4), np.eye(4)
+
+    if cos_theta < -1.0 + 1e-12:          # anti-aligned: rotate π around x̂
+        R     = lorentz_transform_matrix(0, 0, 0, math.pi, 0, 0)
+        R_inv = lorentz_transform_matrix(0, 0, 0, -math.pi, 0, 0)
+        return R, R_inv
+
+    theta     = math.acos(cos_theta)
+    sin_theta = math.sqrt(max(1.0 - cos_theta*cos_theta, 0.0))
+
+    # ω = θ (ny, −nx, 0) / sinθ
+    omx =  theta * ny / sin_theta
+    omy = -theta * nx / sin_theta
+    omz = 0.0
+
+    R     = lorentz_transform_matrix(0, 0, 0,  omx,  omy, omz)
+    R_inv = lorentz_transform_matrix(0, 0, 0, -omx, -omy, omz)
+    return R, R_inv
+
+# -----------------------------------------------------------------------
+# 4-vector / 4-velocity helpers
+# -----------------------------------------------------------------------
+
+def interval(v: np.ndarray) -> float:
+    """Spacetime interval  η_μν v^μ v^ν."""
+    return -v[0]*v[0] + v[1]*v[1] + v[2]*v[2] + v[3]*v[3]
+
+
+def normalize_4velocity(u: np.ndarray) -> np.ndarray:
+    """Rescale so that  η_μν u^μ u^ν = -1."""
+    n2 = interval(u)
+    if abs(n2) < 1e-14:
+        return u
+    return u / math.sqrt(max(-n2, 1e-14))
+
+def normalize_4spin(j: np.ndarray) -> np.ndarray:
+    """Rescale so that  η_μν j^μ j^ν = 1."""
+    n2 = interval(j)
+    if abs(n2) < 1e-14:
+        return j
+    return j / math.sqrt(max(n2, 1e-14))
+
+def four_velocity_from_3velocity(v3) -> np.ndarray:
+    vx, vy, vz = float(v3[0]), float(v3[1]), float(v3[2])
+    vmag = math.sqrt(vx*vx + vy*vy + vz*vz)
+    vmag = min(vmag, 1.0 - 1e-10)
+    gamma = 1.0 / math.sqrt(1.0 - vmag*vmag)
+    return np.array([gamma, gamma*vx, gamma*vy, gamma*vz])
+
+
+def three_velocity_from_4velocity(u: np.ndarray) -> np.ndarray:
+    if abs(u[0]) < 1e-14:
+        return np.zeros(3)
+    return u[1:4] / u[0]
+
+
+# -----------------------------------------------------------------------
+# Change 5: Kerr metric from Lorentz-covariant tetrad, no active transform
+#
+# The tetrad (from CGH.py) with all Lorentz parameters = 0:
+#
+#   e[μ, a] = δ[μ, a]  +  (H/2) L^μ  l_a
+#
+# where  l_a = η_{aν} L^ν  and  L^μ is the Kerr-Schild null vector.
+# Spin axis is always Z in the source rest frame.
+# This is a purely coordinate description — no passive boosts or rotations
+# are applied, which would not correspond to any physical transformation.
+# -----------------------------------------------------------------------
+
+def _ks_r(a: float, x: float, y: float, z: float) -> float:
+    """Kerr radial coordinate r solving  r^4 - (R²-a²)r² - a²z² = 0."""
+    R2 = x*x + y*y + z*z
+    Ra = R2 - a*a
+    b3 = math.sqrt(Ra*Ra + 4.0*a*a*z*z)
+    r2 = (Ra + b3) * 0.5
+    return math.sqrt(max(r2, 0.0))
+
+
+def _ks_H(m: float, a: float, r: float, z: float) -> float:
+    """
+    Kerr-Schild scalar  H = 2 m r³ / (r⁴ + a² z²).
+    Factor of 2 is absorbed here (matches CGH.py convention) so that
+    g_μν = η_μν + H L_μ L_ν  (rather than  η_μν + 2V λ_μ λ_ν).
+    """
+    denom = r**4 + a*a*z*z
+    if denom < 1e-30:
+        return 0.0
+    return 2.0 * m * r**3 / denom
+
+
+def _ks_L(a: float, r: float, x: float, y: float, z: float) -> np.ndarray:
+    """
+    Kerr-Schild null vector  L^μ  (contravariant), spin along +Z.
+    Null with respect to both η and g.
+    """
+    L = np.zeros(4)
+    denom = r*r + a*a
+    L[0] = 1.0
+    if denom > 1e-30:
+        L[1] = (r*x + a*y) / denom
+        L[2] = (r*y - a*x) / denom
+    if r > 1e-30:
+        L[3] = z / r
+    return L
+
+
+def kerr_tetrad_restframe(m: float, a: float, x3) -> np.ndarray:
+    """
+
+    The tetrad  e[μ,a] = I[μ,a] + (H/2) L^μ (η_{aν} L^ν)
+    exactly as in CGH.py but with Lorentz parameters all zero (no active
+    boost or rotation away from the standard Kerr-Schild chart):
+
+    """
+    x, y, z = float(x3[0]), float(x3[1]), float(x3[2])
+    eta = minkowski_metric()
+    r = _ks_r(a, x, y, z)
+    H = _ks_H(m, a, r, z)
+    L = _ks_L(a, r, x, y, z)         # L^μ  (upper)
+    l = eta @ L                        # L_μ  (lower) = η_{μν} L^ν
+    # Tetrad with Λ = I:  e[μ, a] = δ[μ,a] + (H/2) L[μ] l[a]
+    e = np.eye(4) + 0.5 * H * np.outer(l, L)
+    return e
+
+def kerr_metric_restframe(m: float, a0: float, x3) -> np.ndarray:
+    """
+        Kerr metric g_μν at spatial position x3 = (x, y, z) in the source
+        rest frame with spin axis along +Z.
+                g[μ,ν] = η[a,b] e[μ,a] e[ν,b]
+               = η[μ,ν] + H L[μ] L[ν]    (exploiting L·L = 0 w.r.t. η)
+
+    The metric is stationary so only the spatial components of x3 matter.
+    """
+    # g[μ,ν] = η[a,b] e[μ,a] e[ν,b]
+    eta = minkowski_metric()
+    e = kerr_tetrad_restframe(m, a0, x3)
+    return np.einsum('ab,ua,vb->uv', eta, e, e)
+
+def christoffel_fd(x3, m: float, a: float, eps: float = 1e-6) -> np.ndarray:
+    """
+    Christoffel symbols  Γ^μ_{αβ}  via centred finite differences.
+    The metric is stationary, so only spatial derivatives are non-zero.
+    Returns shape (4, 4, 4):  Gamma[mu, alpha, beta].
+    """
+    g0 = kerr_metric_restframe(m, a, x3)
+    ginv = np.linalg.inv(g0)
+
+    # ∂_i g_{μν}  for i ∈ {x, y, z}  →  dg[spatial_index, μ, ν]
+    dg_spatial = np.zeros((3, 4, 4))
+    for i in range(3):
+        dx = np.zeros(3)
+        dx[i] = eps
+        gp = kerr_metric_restframe(m, a, np.array(x3) + dx)
+        gm = kerr_metric_restframe(m, a, np.array(x3) - dx)
+        dg_spatial[i] = (gp - gm) / (2.0 * eps)
+
+    # Full  ∂_α g_{μν}:  α=0 (time) is zero for stationary metric
+    dg = np.zeros((4, 4, 4))          # dg[α, μ, ν]
+    dg[1] = dg_spatial[0]
+    dg[2] = dg_spatial[1]
+    dg[3] = dg_spatial[2]
+
+    # Γ^μ_{αβ} = ½ g^{μν} (∂_α g_{νβ} + ∂_β g_{να} − ∂_ν g_{αβ})
+    Gamma = np.zeros((4, 4, 4))
+    for mu in range(4):
+        for alpha in range(4):
+            for beta in range(4):
+                s = 0.0
+                for nu in range(4):
+                    s += ginv[mu, nu] * (dg[alpha, nu, beta]
+                                       + dg[beta,  nu, alpha]
+                                       - dg[nu, alpha, beta])
+                Gamma[mu, alpha, beta] = 0.5 * s
+    return Gamma
+
+
+def geodesic_acceleration(u: np.ndarray, Gamma: np.ndarray) -> np.ndarray:
+    """
+    Geodesic 4-acceleration:  du^μ/dλ = −Γ^μ_{αβ} u^α u^β.
+    """
+    return -np.einsum('mab,a,b->m', Gamma, u, u)
+
+def geodesic_spin_transport(j: np.ndarray, u: np.ndarray, Gamma: np.ndarray) -> np.ndarray:
+    """
+    Geodesic 4-spin parallel transport:  dj^μ/dλ = −Γ^μ_{αβ} j^α u^β.
+    """
+    return -np.einsum('mab,a,b->m', Gamma, j, u)
+
+def Initialize_spin_vector(j: np.ndarray, u:np.ndarray):
+    """
+    Applies the physical constraint at t=0, such that
+    j_μ u^μ = 0
+    And it will evolve from there.
+    """
+    j[0] = (j[1]*u[1]+j[2]*u[2]+j[3]*u[3])/u[0]
+    return j
+
+
+# -----------------------------------------------------------------------
+# Change 1 & 2: Particle class with worldline cache + proper-time state
+# -----------------------------------------------------------------------
+
+class Particle:
+    """
+    A gravitating body.  Integration is in proper time; coordinate time
+    advances at rate  dt/dλ = u^0 (the Lorentz factor).
+
+    The worldline cache stores snapshots at every integration step,
+    ordered by (monotonically increasing) coordinate time.  Retarded
+    positions are found by binary search on this cache.
+    """
+
+    def __init__(self, pos4: np.ndarray, vel4: np.ndarray, spin4: np.ndarray,
+                 mass: float,
+                 name: str = ""):
+        """
+        Parameters
+        ----------
+        pos4   : initial 4-position (t, x, y, z).
+        vel4   : initial 4-velocity (will be normalised).
+        spin4  : initial 4-spin     (will be normalised)
+        mass   : gravitational mass (G = c = 1).
+        spin_J : 3-vector whose *magnitude* is the Kerr spin parameter a
+                 and whose *direction* is the spin axis in the lab frame.
+                 Examples:
+                   spin_J = (0, 0, 0.5)  -> a=0.5, spin along +Z
+                   spin_J = (0.3, 0, 0)  -> a=0.3, spin along +X
+        name   : optional label for diagnostics.
+        """
+        self.pos = pos4.astype(float).copy()
+        self.vel = normalize_4velocity(vel4.astype(float).copy())
+        self.spin = Initialize_spin_vector(spin4.astype(float).copy(),self.vel)
+        self.mass = mass
+        self.name = name
+
+        self.proper_time: float = 0.0
+        # Cache: list of dicts, sorted by ascending coordinate time.
+        self._cache: list = [self._snapshot()]
+        # ancestry tracking
+        self.parent_ids = []  # names of particles that formed this one
+        self.children = []  # particles formed from this one
+
+        self.birth_time = None  # coordinate time at which this particle was born
+        self.death_time = None          # coordinate time at which this particle died (None = still alive)
+        self.is_ghost = False           # True once it has been merged away from the live list
+
+    # ------------------------------------------------------------------
+
+    def _snapshot(self) -> dict:
+        return {
+            't':   float(self.pos[0]),
+            'pos': self.pos.copy(),
+            'vel': self.vel.copy(),
+            'spin': self.spin.copy(),
+            'lam': self.proper_time,
+        }
+
+    def record(self) -> None:
+        """Append current state to cache."""
+        self._cache.append(self._snapshot())
+
+    @property
+    def coord_time(self) -> float:
+        return float(self.pos[0])
+
+    @property
+    def cache_t_min(self) -> float:
+        return self._cache[0]['t']
+
+    @property
+    def cache_t_max(self) -> float:
+        return self._cache[-1]['t']
+
+    # ------------------------------------------------------------------
+
+    def interpolate_at(self, t_query: float):
+        """
+        Linearly interpolate the cached worldline at coordinate time t_query.
+        Returns (pos4, vel4).  Clamps to cache endpoints if out of range.
+        """
+        cache = self._cache
+        if t_query <= cache[0]['t']:
+            return cache[0]['pos'].copy(), cache[0]['vel'].copy(), cache[0]['spin'].copy(), cache[0]['lam']
+        if t_query >= cache[-1]['t']:
+            return cache[-1]['pos'].copy(), cache[-1]['vel'].copy(), cache[-1]['spin'].copy(), cache[-1]['lam']
+
+        # Binary search for bracketing entries
+        lo, hi = 0, len(cache) - 1
+        while hi - lo > 1:
+            mid = (lo + hi) >> 1
+            if cache[mid]['t'] <= t_query:
+                lo = mid
+            else:
+                hi = mid
+
+        a0, a1 = cache[lo], cache[hi]
+        dt = a1['t'] - a0['t']
+        if dt < 1e-15:
+            return a0['pos'].copy(), a0['vel'].copy(), a0['spin'].copy(), a0['lam']
+        frac = (t_query - a0['t']) / dt
+        pos = a0['pos'] + frac * (a1['pos'] - a0['pos'])
+        vel = a0['vel'] + frac * (a1['vel'] - a0['vel'])
+        spin = a0['spin'] + frac * (a1['spin'] - a0['spin'])
+        lam =  a0['lam'] + frac * (a1['lam'] - a0['lam'])
+        return pos, vel, spin, lam
+
+    # ------------------------------------------------------------------
+    # Change 1: retarded position via cache binary search
+    # ------------------------------------------------------------------
+
+    def retarded_position(self, observer_pos4: np.ndarray,
+                          tol: float = 1e-10, max_iter: int = 64):
+        """
+        Find the retarded 4-position and 4-velocity of this particle as
+        seen from observer_pos4 by binary-searching the worldline cache.
+
+        Solves:  c·(t_obs − t_ret) = |x_src(t_ret) − x_obs|
+                 (with c = 1 in natural units)
+
+        i.e. the separation 4-vector between source and observer is null.
+
+        Parameters
+        ----------
+        observer_pos4 : 4-position of the observer at the *current* time.
+        tol           : coordinate-time tolerance for the bisection.
+        max_iter      : maximum bisection iterations.
+
+        Returns
+        -------
+        pos_ret, vel_ret, spin_ret : 4-position, 4-velocity, 4-spin at the retarded event.
+        """
+        t_obs  = float(observer_pos4[0])
+        x_obs  = observer_pos4[1:4]
+
+        t_lo = self.cache_t_min
+        t_hi = min(self.cache_t_max, t_obs)
+
+        if t_hi <= t_lo:
+            return self._cache[0]['pos'].copy(), self._cache[0]['vel'].copy(), self._cache[0]['spin'].copy(), self._cache[0]['lam']
+
+        def residual(t_ret: float) -> float:
+            """Positive when t_ret is too early, negative when too late."""
+            pos_r, vel_r, spin_r, lam_r = self.interpolate_at(t_ret)
+            dx = pos_r[1:4] - x_obs
+            dist = math.sqrt(float(np.dot(dx, dx)))
+            return (t_obs - t_ret) - dist
+
+        f_lo = residual(t_lo)
+        f_hi = residual(t_hi)
+
+        # If the root is not bracketed, return the nearest endpoint
+        if f_lo * f_hi > 0:
+            t_ret = t_lo if abs(f_lo) < abs(f_hi) else t_hi
+        else:
+            for _ in range(max_iter):
+                t_mid = 0.5 * (t_lo + t_hi)
+                f_mid = residual(t_mid)
+                if abs(f_mid) < tol:
+                    break
+                if f_lo * f_mid <= 0.0:
+                    t_hi = t_mid
+                    f_hi = f_mid
+                else:
+                    t_lo = t_mid
+                    f_lo = f_mid
+            t_ret = 0.5 * (t_lo + t_hi)
+
+        return self.interpolate_at(t_ret)
+
+
+# -----------------------------------------------------------------------
+# N-body acceleration using retarded cache + frame-boosted geodesics
+# -----------------------------------------------------------------------
+
+def compute_acceleration(particle: Particle,
+                          sources: list) -> np.ndarray:
+    """
+    Total geodesic 4-acceleration of *particle* due to all *sources*.
+
+    For each source the evaluation chain is:
+
+      lab  --boost-->  source rest frame  --rotate-->  Z-aligned frame
+           <--un-boost--                 <--un-rotate--
+
+      1. Retarded (causal) position/velocity from cache.
+      2. Boost lab -> source rest frame  (matrix-exponential, K params).
+      3. Active spatial rotation aligning src.spin_unit with +Z
+         (matrix-exponential, J params only, K=0).
+         This is sandwiched between the boosts; it is NOT applied to the
+         tetrad, which would be a passive relabelling, not a physical rotation.
+      4. Tetrad Kerr metric evaluated with spin along Z  (untouched).
+      5. Geodesic acceleration in the Z-aligned source frame.
+      6. Inverse rotation: Z-aligned -> source rest frame.
+      7. Inverse boost: source rest frame -> lab frame.
+    """
+    du_total = np.zeros(4)
+    dj_total = np.zeros(4)
+
+    for src in sources:
+        # 1. Retarded source state -------------------------------------------
+        x_ret, u_ret, j_ret, lam_ret = src.retarded_position(particle.pos)
+        v3_src = three_velocity_from_4velocity(u_ret)
+
+        # 2. Boost: lab -> source rest frame ---------------------------------
+        Lambda_to_src   = boost_matrix_from_3vel(-v3_src)
+        Lambda_from_src = lorentz_inverse(Lambda_to_src)
+
+        u_src  = Lambda_to_src @ u_ret
+        dx_src = Lambda_to_src @ (particle.pos - x_ret)
+        j_src = Lambda_to_src @ j_ret
+
+        # 3. Decompose spin_J into magnitude (spin parameter a) + unit direction
+        norm_j_src = normalize_4spin(j_src)
+        spin_a = math.sqrt(max(interval(j_src), 1e-14))
+        if spin_a > 1e-14:
+            spin_unit = (norm_j_src[1], norm_j_src[2], norm_j_src[3])
+        else:
+            spin_unit = np.array([0.0, 0.0, 1.0])
+
+
+        # 4. Active rotation: source rest frame -> Z-aligned frame -----------
+        # rotation_to_align_spin returns the matrix that takes spin_unit -> Z.
+        # Both the position offset and the 4-velocity must be rotated so
+        # that the Kerr geometry (whose symmetry axis is Z in the tetrad)
+        # is evaluated in the correct orientation.
+
+        R_to_z, R_from_z = rotation_to_align_spin(spin_unit)
+
+        dx_rot = R_to_z @ dx_src
+        u_rot  = R_to_z @ u_src
+        j_rot  = R_to_z @ j_src
+        x_rel  = dx_rot[1:4]          # spatial offset in Z-aligned frame
+
+        # 5. Kerr geodesic in Z-aligned source frame (tetrad, untouched) -
+        Gamma  = christoffel_fd(x_rel, src.mass, spin_a)
+        du_rot = geodesic_acceleration(u_rot, Gamma)
+        dj_rot = geodesic_spin_transport(j_rot,u_rot,Gamma)
+
+        # 6. Un-rotate: Z-aligned -> source rest frame -----------------------
+        du_src_frame = R_from_z @ du_rot
+        dj_src_frame = R_from_z @ dj_rot
+
+        # 7. Un-boost: source rest frame -> lab frame ------------------------
+        du_total += Lambda_from_src @ du_src_frame
+        dj_total += Lambda_from_src @ dj_src_frame
+
+    return du_total, dj_total
+
+
+def Quantum(particle: Particle, dlambda: float):
+    M = particle.mass
+    v4 = particle.vel
+    v3 = three_velocity_from_4velocity(v4)
+    dr = np.sqrt(dlambda/M)
+    deltaX = np.zeros((4))
+    deltaX[0] = 0
+    deltaX[1] = np.random.normal() * dr
+    deltaX[2] = np.random.normal() * dr
+    deltaX[3] = np.random.normal() * dr
+    Lambda_from_rest = boost_matrix_from_3vel(v3)
+    dX4 = Lambda_from_rest @ deltaX
+    return dX4
+
+
+# -----------------------------------------------------------------------
+# Change 2: proper-time integration step
+# -----------------------------------------------------------------------
+
+def euler_step(particle: Particle, dlambda: float,
+               sources: list) -> None:
+    """Advance particle by one proper-time step  dλ  (forward Euler)."""
+    dX4 = Quantum(particle, dlambda)
+    particle.pos += dX4
+    du, dj = compute_acceleration(particle, sources)
+    particle.vel = particle.vel + du * dlambda
+    particle.spin = particle.spin + dj * dlambda
+    particle.pos = particle.pos + particle.vel * dlambda
+    particle.proper_time += dlambda
+    particle.record()
+
+
+# -----------------------------------------------------------------------
+# Change 3: coordinate-time-synchronised N-body loop
+#
+# All particles are advanced in *their own proper times* until every
+# particle's worldline cache extends to the same target coordinate time.
+# This guarantees that the retarded-time binary search always has
+# sufficient history for any particle pair, regardless of how fast each
+# particle's coordinate time ticks relative to its proper time.
+# -----------------------------------------------------------------------
+
+def advance_to_coord_time(particle: Particle, t_target: float,
+                          dlambda: float, sources: list,
+                          integrator=euler_step) -> None:
+    """
+    Integrate *particle* in proper time until  coord_time >= t_target.
+
+    The inner loop uses  dlambda  proper-time steps.  Because
+        dt_coord / dλ = u^0 = γ ≥ 1
+    particles moving rapidly will take *fewer* proper-time steps to
+    reach the same coordinate-time target.  The cache accumulates all
+    intermediate states, providing a dense worldline for retarded lookups.
+    """
+    while particle.coord_time < t_target:
+        integrator(particle, dlambda, sources)
+
+
+
+# -----------------------------------------------------------------------
+# FIX: build_observer_view takes particles (with caches), not histories
+# -----------------------------------------------------------------------
+def build_observer_view(observer: Particle,
+                        particles: list,
+                        ghosts: list = None):
+    """
+    Build a first-person view for `observer` at its current event.
+
+    For each source:
+      - Find the retarded event on the source worldline as seen by the observer.
+      - Form the separation 4-vector in the lab frame.
+      - Boost into the observer's instantaneous rest frame.
+      - Rotate so that the observer's spin points along +Z.
+    Returns a list of dicts, one per visible source.
+    """
+    """
+        Build a first-person view for `observer` at its current event.
+
+        Includes both live particles and ghosts.  A ghost is only visible
+        while the retarded time the observer is seeing is still earlier
+        than that ghost's death_time.  This keeps the pre-merger particles
+        on screen until the light from the merger reaches the camera.
+
+        All returned data are already in the observer's instantaneous
+        rest frame (boosted + spin-aligned).  No lab-frame quantities
+        are exposed to the renderer.
+    """
+    if ghosts is None:
+        ghosts = []
+
+    # Observer state in lab frame
+    x_obs = observer.pos.copy()
+    u_obs = observer.vel.copy()
+    j_obs = observer.spin.copy()
+
+    # 3-velocity of observer
+    v3_obs = three_velocity_from_4velocity(u_obs)
+
+    # Boost lab -> observer rest frame
+    Lambda_to_obs   = boost_matrix_from_3vel(-v3_obs)
+    Lambda_from_obs = lorentz_inverse(Lambda_to_obs)
+
+    # Observer spin direction in its rest frame (for orientation)
+    j_obs_rest = Lambda_to_obs @ j_obs
+    j_obs_rest = normalize_4spin(j_obs_rest)
+    spin_unit_obs = np.array([j_obs_rest[1], j_obs_rest[2], j_obs_rest[3]])
+
+    # Rotate so that observer spin points along +Z
+    R_to_z, R_from_z = rotation_to_align_spin(spin_unit_obs)
+
+    events = []
+
+    # Candidates = live particles + ghosts
+    candidates = list(particles) + list(ghosts)
+
+    for src in candidates:
+        if src is observer:
+            continue
+
+        # Retarded event of source as seen from observer's current position
+        x_ret, u_ret, j_ret, lam_ret = src.retarded_position(x_obs)
+
+        t_ret = float(x_ret[0])
+        # ---------- visibility window ----------
+        # Birth: particle is invisible until the light from its birth event
+        # actually reaches the observer.  A clamped t_ret at the start of
+        # the cache means the light has not arrived yet.
+        if src.birth_time is not None:
+            if t_ret < src.birth_time + 1e-8:
+                continue
+            # Still clamped to the very first cache entry → light has not arrived
+            if abs(t_ret - src.cache_t_min) < 1e-8:
+                continue
+
+        # Death (ghosts): disappear once retarded time reaches death event
+        # or the cache has ended
+        if src.death_time is not None:
+            if t_ret >= src.death_time - 1e-6:
+                continue
+            if t_ret >= src.cache_t_max - 1e-6:
+                continue
+        # ---------------------------------------
+
+        # Separation in lab frame: source_ret - observer_now
+        dx_lab = x_ret - x_obs
+
+        # Boost into observer rest frame
+        dx_obs = Lambda_to_obs @ dx_lab
+
+        # Rotate so that observer spin is +Z
+        dx_obs_z = R_to_z @ dx_obs
+
+        events.append({
+            'name': src.name,
+            'x4_obs': dx_obs,      # 4-position of source event in observer Z-aligned frame
+            'lambda_src_ret': lam_ret,
+            'src_mass': src.mass,
+            'is_ghost': src.is_ghost,
+            'death_time': src.death_time,
+            't_ret': t_ret,
+        })
+
+    return events
+
+def run_nbody_step(particles: list,
+                   ghosts: list,
+                   observer_name: str,
+                   dlambda: float,
+                   frame_idx: int,
+                   print_every: int = 10):
+    """
+    Performs ONE observer-driven N-body frame step.
+
+    Returns
+    -------
+    view_events : list of retarded, boosted, rotated source events
+                  (already player-centric; includes visible ghosts)
+    t_obs       : observer coordinate time
+    particles   : (possibly updated) live particle list
+    ghosts      : updated ghost list
+    """
+
+    particles_by_name = {p.name: p for p in particles}
+    observer = particles_by_name[observer_name]
+
+    # 1. Advance the observer one proper-time step
+    other_particles = [p for p in particles if p is not observer]
+    euler_step(observer, dlambda, other_particles)
+
+    # 2. Target coordinate time defined by the observer
+    t_target = observer.coord_time
+
+    # 3. Advance all other live particles to the same coordinate time
+    for p in other_particles:
+        p_sources = [q for q in particles if q is not p]
+        advance_to_coord_time(p, t_target, dlambda, p_sources)
+
+    # 4. Build the player-centric view (live + still-visible ghosts)
+    view_events = build_observer_view(observer, particles, ghosts)
+
+    # 5. Print observer-view data (player-centric only)
+    if (frame_idx % print_every) == 0:
+        print(f"[run_nbody_step] frame {frame_idx}, t_obs = {t_target:.6f}, "
+              f"lambda_obs = {observer.proper_time:.6f}, "
+              f"visible sources = {len(view_events)}")
+        for ev in view_events:
+            ghost_flag = " (ghost)" if ev.get('is_ghost') else ""
+            print(f"    {ev['name']}{ghost_flag}: "
+                  f"t_ret={ev['t_ret']:.4f}, "
+                  f"λ_ret={ev['lambda_src_ret']:.4f}, "
+                  f"mass={ev['src_mass']:.3f}")
+
+    return view_events, t_target, particles, ghosts
+
+
+def spawn_grid(n, spacing):
+    pts = []
+    counter = 0
+
+    for i in range(n):
+        x = np.random.normal()*spacing
+        y = np.random.normal()*spacing
+        z = np.random.normal()*spacing
+
+        pos4 = np.array([0.0, x, y, z])
+        vel4 = four_velocity_from_3velocity((0,0,0))
+
+        spin = np.array([
+            0.0,
+            np.random.normal(),
+            np.random.normal(),
+            np.random.normal()
+        ])
+
+        pts.append(
+            Particle(
+                pos4=pos4,
+                vel4=vel4,
+                spin4=spin,
+                mass=np.random.uniform(),
+                name=f"p{counter}"
+            )
+        )
+        counter += 1
+
+    return pts
+
+def run_example_debug(n,r):
+    particles = []
+    # add grid particles
+    particles += spawn_grid(n, r)
+    observer = particles[0]  # or whichever
+    observer_name = observer.name
+    dlambda = 1
+    return particles, observer_name, dlambda
+
+def run_example():
+    M = 10
+    r0 = 100
+    v_c = math.sqrt(M / r0)
+
+    p1 = Particle(
+        pos4=np.array([0.0, 0.0, -r0, 0.0]),
+        vel4=four_velocity_from_3velocity((v_c / 2, 0.0, 0.0)),
+        mass=M,
+        spin4=np.array([0.0, 0.5, 0.0, 0.0]),
+        name="p1",
+    )
+    p1.birth_time = p1.pos[0]
+    p2 = Particle(
+        pos4=np.array([0.0, 0.0, r0, 0.0]),
+        vel4=four_velocity_from_3velocity((-v_c / 2, 0.0, 0.0)),
+        mass=M,
+        spin4=np.array([0.0, -0.4, 0.0, 0.3]),
+        name="p2",
+    )
+    p2.birth_time = p2.pos[0]
+    p3 = Particle(
+        pos4=np.array([0.0, 0, 0, -r0*60]),
+        vel4=four_velocity_from_3velocity((0.0, 0.0, 11/61)),
+        mass=M,
+        spin4=np.array([0.0, 0.0, 0.0, 1.0]),
+        name="p3",
+    )
+    p3.birth_time = p3.pos[0]
+
+    particles = [p1, p2, p3]
+    observer_name = "p3"
+    dlambda = 10
+
+    return particles, observer_name, dlambda
+
+def rebind_observer(observer, particles):
+    # Case 1: observer still exists
+    if observer in particles:
+        return observer
+
+    # Case 2: observer was merged — find the particle that lists it as a parent
+    for p in particles:
+        if observer.name in p.parent_ids:
+            return p
+
+    # Case 3: fallback — choose nearest particle in spacetime
+    return min(
+        particles,
+        key=lambda p: np.linalg.norm(p.pos4 - observer.pos4)
+    )
+
+def relative_ks_r(p_obs: Particle, p_src: Particle) -> float:
+    """
+    Kerr radial coordinate of p_obs as measured in the instantaneous
+    rest frame of p_src after spin alignment to +Z.
+    Exactly the same boost → rotate sandwich used by compute_acceleration.
+    """
+    # Use current states (pair is already synchronized and close)
+    x_ret0, u_ret0, j_ret0, lam_ret0 = p_src.retarded_position(p_obs.pos.copy())
+    v3_src = three_velocity_from_4velocity(u_ret0)
+    Lambda_to_src = boost_matrix_from_3vel(-v3_src)
+
+    dx_src = Lambda_to_src @ (p_obs.pos - x_ret0)
+
+    j_src = Lambda_to_src @ j_ret0
+    spin_a = math.sqrt(max(interval(j_src), 1e-14))
+    if spin_a > 1e-14:
+        norm_j = normalize_4spin(j_src)
+        spin_unit = (norm_j[1], norm_j[2], norm_j[3])
+    else:
+        spin_unit = np.array([0.0, 0.0, 1.0])
+
+    R_to_z, _ = rotation_to_align_spin(spin_unit)
+    dx_rot = R_to_z @ dx_src
+    x_rel = dx_rot[1:4]
+
+    return _ks_r(spin_a, x_rel[0], x_rel[1], x_rel[2])
+
+def is_singularity(p1: Particle, p2: Particle, eps: float = 5e-4) -> bool:
+    """
+    True when the relative Kerr radius of either particle inside the
+    other has fallen below eps.  This is the point at which the
+    finite-difference Christoffel symbols become unreliable.
+    """
+    r12 = relative_ks_r(p1, p2)
+    r21 = relative_ks_r(p2, p1)
+    return min(r12, r21) < eps
+
+def renorm_via_tetrad(V_lab: np.ndarray,
+                      src: Particle,
+                      obs_pos: np.ndarray) -> np.ndarray:
+    """
+    Frame sandwich identical to compute_acceleration, but the final
+    operation is a tetrad projection instead of a geodesic acceleration.
+
+    lab  --boost-->  src rest  --rotate-->  Z-aligned
+         <--un-boost--          <--un-rotate--
+
+    Inside the Z-aligned chart the (copy of the) rest-frame tetrad
+    converts the coordinate 4-vector into a local Lorentz (“flat”)
+    4-vector.  The inverse sandwich then returns that local vector
+    to the lab.  A transpose of the *copy* is used if needed; the
+    original tetrad function is never modified.
+    """
+    v3_src = three_velocity_from_4velocity(src.vel)
+    Lambda_to_src   = boost_matrix_from_3vel(-v3_src)
+    Lambda_from_src = lorentz_inverse(Lambda_to_src)
+
+    V_src  = Lambda_to_src @ V_lab
+    dx_src = Lambda_to_src @ (obs_pos - src.pos)
+
+    j_src = Lambda_to_src @ src.spin
+    spin_a = math.sqrt(max(interval(j_src), 1e-14))
+    if spin_a > 1e-14:
+        norm_j = normalize_4spin(j_src)
+        spin_unit = (norm_j[1], norm_j[2], norm_j[3])
+    else:
+        spin_unit = np.array([0.0, 0.0, 1.0])
+
+    R_to_z, R_from_z = rotation_to_align_spin(spin_unit)
+
+    V_rot  = R_to_z @ V_src
+    dx_rot = R_to_z @ dx_src
+    x_rel  = dx_rot[1:4]
+
+    # --- tetrad in the compute frame (copy only) ---
+    e = kerr_tetrad_restframe(src.mass, spin_a, x_rel).copy()
+
+    # Optional transpose of the *copy* (never of the original function).
+    # Try e.T first; if mass explodes, switch to np.linalg.inv(e).
+    # Both preserve the metric factors that encode time dilation.
+    e_map = e.T          # or np.linalg.inv(e) if preferred after testing
+
+    # Coordinate → local Lorentz
+    V_local = e @ V_rot
+
+    # --- return to lab ---
+    V_src_frame = R_from_z @ V_local
+    V_lab_ren   = Lambda_from_src @ V_src_frame
+    return V_lab_ren
+
+def merge_particles_tetrad(p1: Particle, p2: Particle) -> Particle:
+    """
+    Replace the naïve P1+P2 addition by the two-sided tetrad
+    renormalization described in the request.
+
+    1. Map (P1, J1) through p2’s geometry → contribution of parent 1
+    2. Map (P2, J2) through p1’s geometry → contribution of parent 2
+    3. Sum the renormalized vectors
+    4. Reconstruct mass, 4-velocity and 4-spin from the sum
+    """
+    # Lab 4-momenta and 4-spins (identical to original merge_particles)
+    P1 = p1.mass * p1.vel
+    P2 = p2.mass * p2.vel
+    J1 = p1.spin.copy()
+    J2 = p2.spin.copy()
+
+    # One-sided renormalizations
+    P1_ren = renorm_via_tetrad(P1, p2, p1.pos)
+    J1_ren = renorm_via_tetrad(J1, p2, p1.pos)
+
+    P2_ren = renorm_via_tetrad(P2, p1, p2.pos)
+    J2_ren = renorm_via_tetrad(J2, p1, p2.pos)
+
+    # Sum (the tetrad factors have already suppressed the near-singularity blow-up)
+    P_new = P1_ren + P2_ren
+    J_new = J1_ren + J2_ren
+
+    m_new = math.sqrt(max(-(interval(P_new)), 1e-14))
+    u_new = P_new / m_new
+
+    # Position still the momentum-weighted average (or singularity location)
+    x_new = (p1.mass * p1.pos + p2.mass * p2.pos) / (p1.mass + p2.mass)
+
+    merged = Particle(
+        pos4=x_new,
+        vel4=u_new,
+        spin4=J_new,
+        mass=m_new,
+        name=f"{p1.name}+{p2.name}"
+    )
+    merged.parent_ids = [p1.name, p2.name]
+    p1.children.append(merged)
+    p2.children.append(merged)
+    return merged
+
+def horizon_radius(p: Particle) -> float:
+    M = p.mass
+    return M
+
+def check_merger_condition(p1: Particle, p2: Particle) -> bool:
+    """
+    Simple geometric merger rule:
+    two holes merge when their spatial separation
+    is less than the sum of their horizon radii.
+    """
+    x1 = p1.pos[1:4]
+    x2 = p2.pos[1:4]
+    r12 = float(np.linalg.norm(x1 - x2))
+
+    R1 = horizon_radius(p1)
+    R2 = horizon_radius(p2)
+
+    return r12 <= (R1 + R2)
+
+def apply_mergers(particles, ghosts, dlambda_plunge=0.05, max_plunge_steps=2000):
+    """
+    Keep original horizon test as the trigger that a pair has entered
+    the strong-field regime.  Once triggered, integrate the pair in
+    isolation until a singularity is reached, discarding any cache
+    entries that were written after the singularity time.  Only then
+    perform the tetrad-renormalized merger.
+    """
+    new_live = []
+    new_ghosts = list(ghosts)
+    skip = set()
+
+    for i, p1 in enumerate(particles):
+        if i in skip:
+            continue
+        for j, p2 in enumerate(particles):
+            if j <= i or j in skip:
+                continue
+
+            # ----- original geometric horizon test (entry condition) -----
+            if not check_merger_condition(p1, p2):
+                continue
+
+            # ----- plunge until singularity -----
+            singularity_hit = False
+            for _ in range(max_plunge_steps):
+                if is_singularity(p1, p2):
+                    singularity_hit = True
+                    break
+
+                # Guarded Euler steps (only the mutual interaction)
+                try:
+                    # record length before the step so we can discard
+                    len1 = len(p1._cache)
+                    len2 = len(p2._cache)
+
+                    euler_step(p1, dlambda_plunge, [p2])
+                    euler_step(p2, dlambda_plunge, [p1])
+
+                    # crude NaN / explosion guard
+                    if (np.linalg.norm(p1.pos[1:4]-p2.pos[1:4]) > (p1.mass + p2.mass) or
+                        abs(p1.vel[0]) > 100 or abs(p2.vel[0]) > 100 or
+                        not np.all(np.isfinite(p1.pos)) or not np.all(np.isfinite(p2.pos))):
+                        # discard the bad entries
+                        p1._cache = p1._cache[:len1]
+                        p2._cache = p2._cache[:len2]
+                        # restore last good state
+                        if len1 > 0:
+                            last = p1._cache[-1]
+                            p1.pos, p1.vel, p1.spin = last['pos'], last['vel'], last['spin']
+                            p1.proper_time = last['lam']
+                        if len2 > 0:
+                            last = p2._cache[-1]
+                            p2.pos, p2.vel, p2.spin = last['pos'], last['vel'], last['spin']
+                            p2.proper_time = last['lam']
+                        singularity_hit = True
+                        break
+                except Exception:
+                    # any numerical failure → treat as singularity
+                    p1._cache = p1._cache[:len1]
+                    p2._cache = p2._cache[:len2]
+                    singularity_hit = True
+                    break
+
+            if not singularity_hit:
+                # safety: force merge after max steps
+                singularity_hit = True
+
+            # ----- singularity reached: tetrad merger -----
+            t_merge = max(p1.coord_time, p2.coord_time)
+
+            merged = merge_particles_tetrad(p1, p2)
+
+            print("=== MERGER DEBUG ===")
+            print("merged name:", merged.name)
+            print("merged birth_time:", merged.birth_time)
+            print("merged mass:", merged.mass)
+            print("merged pos:", merged.pos)
+            print("p1 death_time:", p1.death_time, "cache_t_max:", p1.cache_t_max)
+            print("p2 death_time:", p2.death_time, "cache_t_max:", p2.cache_t_max)
+            print("====================")
+
+            merged.birth_time = t_merge
+
+            p1.death_time = t_merge
+            p2.death_time = t_merge
+            p1.is_ghost = True
+            p2.is_ghost = True
+
+            new_ghosts.append(p1)
+            new_ghosts.append(p2)
+            new_live.append(merged)
+
+            skip.add(i)
+            skip.add(j)
+            break
+        else:
+            if not p1.is_ghost:
+                new_live.append(p1)
+
+    return new_live, new_ghosts
+
+
+def prune_ghosts(ghosts, observer):
+    """Remove ghosts whose light has already reached the current observer."""
+    alive_ghosts = []
+    x_obs = observer.pos
+    for g in ghosts:
+        if g.death_time is None:
+            alive_ghosts.append(g)
+            continue
+        # Quick check: if the latest possible retarded time is already past death
+        if g.cache_t_max < g.death_time - 1e-6:
+            # cache ended before death_time – keep for a moment longer if needed
+            alive_ghosts.append(g)
+            continue
+        # Ask for the retarded time the observer would see right now
+        x_ret, _, _, _ = g.retarded_position(x_obs)
+        t_ret = float(x_ret[0])
+        if t_ret < g.death_time - 1e-6 and t_ret < g.cache_t_max - 1e-6:
+            alive_ghosts.append(g)
+        # otherwise the ghost is no longer visible → drop it
+    return alive_ghosts
+
+    # -----------------------------------------------------------------------
+    # MAIN - CLEAN BODY TRIAD VERSION (only this section is improved)
+    # -----------------------------------------------------------------------
+
+def main():
+    pygame.init()
+    width, height = 720, 480
+    screen = pygame.display.set_mode((width, height))
+    pygame.display.set_caption("Black Hole Orbiter - Body Frame Camera")
+    clock = pygame.time.Clock()
+
+    particles, observer_name, dlambda = run_example()
+    ghosts = []
+    frame_idx = 0
+    observer = {p.name: p for p in particles}[observer_name]
+
+    prev_lambdas = {}  # name → last λ_ret the observer saw
+
+    # Body triad (world space)
+    w_body = np.array([0,0,0],dtype=float)
+    # Convention: X = right, Y = up, Z = forward  (matches Godot feel + Python depth = component 3)
+    X = np.array([1.0, 0.0, 0.0])
+    Y = np.array([0.0, 0.0, 1.0])
+    Z = np.array([0.0, 1.0, 0.0])
+
+    R0 = np.eye(4)
+
+    boost_strength = 0.06
+    rot_strength   = 0.001
+
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+        keys = pygame.key.get_pressed()
+
+        # ---------- Body-frame input ----------
+        boost_input = np.zeros(3)
+        rot_input   = np.zeros(3)
+
+        w_world = X * w_body[0] + Y * w_body[1] + Z * w_body[2]
+
+        # Pure spatial rotation (your preferred method)
+        R = lorentz_transform_matrix(0.0, 0.0, 0.0,
+                                     w_world[0], w_world[1], w_world[2])
+
+        # Rotate the triad (extract the spatial 3×3 block)
+        R0 = R0 @ R
+        R3 = np.linalg.inv(R[1:4,1:4])
+
+        # Movement (WASD + Space/Shift)  – body frame
+        if keys[pygame.K_w]:          boost_input[1] += 1   # Forward
+        if keys[pygame.K_s]:          boost_input[1] -= 1   # Backward
+        if keys[pygame.K_a]:          boost_input[0] -= 1   # Left
+        if keys[pygame.K_d]:          boost_input[0] += 1   # Right
+        if keys[pygame.K_SPACE]:      boost_input[2] += 1   # Up
+        if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+                                      boost_input[2] -= 1   # Down
+
+        # Rotation (Arrow keys + Q/E)  – body frame
+        if keys[pygame.K_UP]:         rot_input[0] += 1     # Pitch up
+        if keys[pygame.K_DOWN]:       rot_input[0] -= 1     # Pitch down
+        if keys[pygame.K_LEFT]:       rot_input[2] += 1     # Yaw left
+        if keys[pygame.K_RIGHT]:      rot_input[2] -= 1     # Yaw right
+        if keys[pygame.K_q]:          rot_input[1] += 1     # Roll left
+        if keys[pygame.K_e]:          rot_input[1] -= 1     # Roll right
+
+        # ---------- Body-frame boost ----------
+        if np.linalg.norm(boost_input) > 1e-6:
+            body_dir = boost_input / np.linalg.norm(boost_input)
+            world_dir = body_dir[0]*X + body_dir[1]*Y + body_dir[2]*Z
+            Boost = boost_matrix_from_3vel(world_dir * boost_strength)
+            observer.vel  = Boost @ observer.vel
+            observer.spin = Boost @ observer.spin
+
+        # ---------- Body-frame rotation using your lorentz_transform_matrix ----------
+        if np.linalg.norm(rot_input) > 1e-6:
+            # Body-frame generator components
+            body_dir0 = rot_input / np.linalg.norm(rot_input)
+            #world_dir0 = body_dir0[0]*X + body_dir0[1]*Y + body_dir0[2]*Z
+            w_body += body_dir0 * rot_strength
+
+
+        #R3 =
+        X = R3 @ X
+        Y = R3 @ Y
+        Z = R3 @ Z
+
+        # Generate the spin from the observer's angular velocity
+        observer.spin = np.array((0.0, w_world[0], w_world[1], w_world[2]))
+
+        # Final constraints
+        observer.vel  = normalize_4velocity(observer.vel)
+        observer.spin = Initialize_spin_vector(observer.spin, observer.vel)
+
+        # ---------- Physics (unchanged) ----------
+        view_events, t_obs, particles, ghosts = run_nbody_step(
+            particles, ghosts, observer_name, dlambda, frame_idx
+        )
+
+        # Apply mergers (returns both live list and updated ghosts)
+        particles, ghosts = apply_mergers(particles, ghosts)
+
+        observer = rebind_observer(observer, particles)
+        observer_name = observer.name
+
+        ghosts = prune_ghosts(ghosts, observer)
+
+        # ---------- Render ----------
+        screen.fill((0, 0, 0))
+
+        for ev in view_events:
+            name = ev['name']
+            lam = ev['lambda_src_ret']
+
+            # Δλ since the last time this source was seen by the observer
+            if name in prev_lambdas:
+                delta_lambda = lam - prev_lambdas[name]
+            else:
+                delta_lambda = 0.0  # first appearance
+
+            # Store for next frame
+            prev_lambdas[name] = lam
+
+            # Safety: ignore negative or tiny values (can happen with ghosts / clamping)
+            if delta_lambda < 1e-8:
+                delta_lambda = 1e-8
+
+            # ----- brightness model -----
+            # Simple linear scaling with a soft clamp.
+            # You can later replace this with any function of Δλ.
+            brightness = min(1.0, delta_lambda * 0.5 / dlambda)  # tune the 3.0 factor
+            # brightness is now in [0.15 … 1.0]
+
+            grey = int(255 * brightness)
+            color = (grey, grey, grey)
+
+            # Optional: also let Δλ affect apparent size a little
+            size_factor = 1
+
+            x4 = R0 @ ev["x4_obs"]
+            Xv, Yv, Zv = x4[1], x4[2], x4[3]
+
+            if Zv > 0.1:
+                sx = int(width / 2 + 540 * Xv / Zv)
+                sy = int(height / 2 - 540 * Yv / Zv)
+
+                if 0 <= sx < width and 0 <= sy < height:
+                    dist = max(np.sqrt(Xv * Xv + Yv * Yv + Zv * Zv), 1.0)
+                    radius = max(1, int(540 * ev['src_mass'] * size_factor / dist))
+                    pygame.draw.circle(screen, color, (sx, sy), radius)
+
+        # Clean up prev_lambdas for particles that are no longer visible
+        # (optional but keeps the dict from growing forever)
+        visible_names = {ev['name'] for ev in view_events}
+        prev_lambdas = {k: v for k, v in prev_lambdas.items() if k in visible_names}
+        font = pygame.font.SysFont("Comic Sans MS", 20)
+        hud = font.render(f"time={observer.proper_time:.2f}  mass={observer.mass:.2f}", True, (200,200,200))
+        screen.blit(hud, (20, 20))
+        pygame.display.flip()
+        clock.tick(60)
+        frame_idx += 1
+    pygame.quit()
+    sys.exit()
+
+if __name__ == "__main__":
+    main()
