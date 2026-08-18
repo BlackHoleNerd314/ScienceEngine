@@ -1,6 +1,3 @@
-import pygame
-import numpy as np
-from scipy.linalg import expm
 
 # Here are the massive bargmann wigner equations
 # using the real majorana gamma matrices
@@ -28,6 +25,13 @@ from scipy.linalg import expm
 
 #Kerr-Schild coordinates derivation:
 #http://www.fen.bilkent.edu.tr/~gurses/lorentzcovariant.pdf
+
+
+
+
+
+import numpy as np
+from scipy.linalg import expm
 
 
 T0 = np.array([[0,0,0,-1],[0,0,1,0],[0,-1,0,0],[1,0,0,0]])
@@ -245,7 +249,7 @@ def PsiInit(N):
             for z in range(-N,N+1):
                 Psi[x+N,y+N,z+N,:] = [0,0,0,0]
 # WIP on my black hole-particle duality hypothesis
-print(DiracStep(13,3,4,12,np.array([0.1,0,0,0]),np.array([0,0,0.3,0]),np.array([0,0.2,0,0]),np.array([0,0,0,0.5])))
+#print(DiracStep(13,3,4,12,np.array([0.1,0,0,0]),np.array([0,0,0.3,0]),np.array([0,0.2,0,0]),np.array([0,0,0,0.5])))
 
 
 # Tests
@@ -327,7 +331,7 @@ def TestAll():
     VolumeTest(m, a, t, x, y, z, Kx, Ky, Kz, Jx, Jy, Jz)
     GammaFrameTest()
 
-TestAll()
+
 
 
 
