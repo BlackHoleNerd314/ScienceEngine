@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>On the Nature of Things — ScienceEngine</title>
+  <style>
+    :root {
+      --bg: #07080d;
+      --panel: #12141c;
+      --line: #2a3144;
+      --text: #e8ecf4;
+      --muted: #9aa3b8;
+      --accent: #7eb6ff;
+      --gold: #e2c07a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      background:
+        radial-gradient(900px 500px at 10% -10%, #1a2240 0%, transparent 55%),
+        var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+    }
+    header, main, footer { max-width: 980px; margin: 0 auto; padding: 1.5rem; }
+    header { padding-top: 3rem; }
+    .kicker {
+      color: var(--gold);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      font-family: system-ui, sans-serif;
+    }
+    h1 { font-size: clamp(2rem, 5vw, 3.2rem); margin: 0.35rem 0 0.6rem; font-weight: 500; }
+    .lede { color: var(--muted); max-width: 42rem; font-size: 1.15rem; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1rem;
+      margin: 2rem 0;
+    }
+    article, .embed {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 1.25rem 1.35rem;
+    }
+    h2 { margin: 0 0 0.4rem; font-size: 1.25rem; }
+    p { margin: 0.4rem 0 1rem; color: var(--muted); }
+    a.button {
+      display: inline-block;
+      margin: 0.2rem 0.4rem 0.2rem 0;
+      padding: 0.45rem 0.8rem;
+      border-radius: 999px;
+      text-decoration: none;
+      font-family: system-ui, sans-serif;
+      font-size: 0.9rem;
+      border: 1px solid var(--line);
+      color: var(--text);
+    }
+    a.button.primary { background: var(--accent); color: #081018; border-color: transparent; }
+    iframe {
+      width: 100%;
+      height: 640px;
+      border: 0;
+      border-radius: 10px;
+      background: #000;
+    }
+    code {
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 0.85rem;
+      color: var(--gold);
+    }
+    footer { color: var(--muted); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="kicker">Theory and engine</div>
+    <h1>On the Nature of Things 1001</h1>
+    <p class="lede">
+      A modern <em>De Rerum Natura</em>: nature as one substance, particles as
+      black holes, and a laptop-scale Kerr–Schild engine that plays the idea
+      instead of only writing it down.
+    </p>
+  </header>
+
+  <main>
+    <div class="grid">
+      <article>
+        <h2>The book</h2>
+        <p>
+          Erik Jorgensen, 2026. Hosted on the Internet Archive under a
+          Public Domain Mark. PDF and ODT downloads are on the item page.
+        </p>
+        <a class="button primary" href="https://archive.org/details/on-the-nature-of-things-1001">
+          Open on Archive.org
+        </a>
+        <a class="button" href="https://archive.org/embed/on-the-nature-of-things-1001">
+          Reader only
+        </a>
+      </article>
+
+      <article>
+        <h2>The engine</h2>
+        <p>
+          ScienceEngine: real-time Kerr–Schild N-body code in Python.
+          Each particle is a rotating Kerr black hole. Requires NumPy,
+          SciPy, and Pygame.
+        </p>
+        <a class="button primary" href="https://github.com/BlackHoleNerd314/ScienceEngine/tree/main">
+          View source on GitHub
+        </a>
+        <a class="button" href="https://github.com/BlackHoleNerd314/ScienceEngine">
+          Repo home
+        </a>
+      </article>
+    </div>
+
+    <section class="embed">
+      <h2>Read the book here</h2>
+      <p>Embedded Internet Archive book reader. Use the Archive page if the frame is blocked.</p>
+      <iframe
+        src="https://archive.org/embed/on-the-nature-of-things-1001"
+        title="On the Nature of Things 1001"
+        allowfullscreen
+      ></iframe>
+    </section>
+
+    <section class="embed" style="margin-top:1rem;">
+      <h2>Run the engine locally</h2>
+      <p>GitHub Pages cannot execute the Python simulator. Clone and run on your machine:</p>
+      <p><code>git clone https://github.com/BlackHoleNerd314/ScienceEngine.git</code></p>
+      <p><code>cd ScienceEngine</code></p>
+      <p><code>pip install numpy scipy pygame</code></p>
+      <p><code>python Main.py</code></p>
+    </section>
+  </main>
+
+  <footer>
+    Public domain text on Internet Archive · source on GitHub · hosted with GitHub Pages
+  </footer>
+</body>
+</html>
